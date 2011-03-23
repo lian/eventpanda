@@ -1,4 +1,5 @@
 require 'ffi'
+require 'socket'
 
 module EventPanda
   extend FFI::Library
@@ -34,6 +35,7 @@ module EventPanda
   EVLOOP_NONBLOCK = 2
   EV_TIMEOUT = 1
   EV_READ = 2
+  EV_WRITE = 4
   EV_PERSIST = 10
   attach_function :event_base_loop, [:pointer, :int], :int
 end
@@ -83,12 +85,92 @@ module EventPanda
   end
 
 
+  def self.add_timer(i, &b); EventPanda::Timer.new(i, b); end
+  def self.add_periodic_timer(i, &b); EventPanda::PeriodicTimer.new(i, b); end
+
   def self.run(&block)
     base = Thread.current[:ev_base] ||= EventPanda.event_base_new
-    block.call if block; EventPanda.event_base_dispatch(base)
+    block.call(base) if block; EventPanda.event_base_dispatch(base)
   end
-end; EM = EventPanda
+  ::EM = EventPanda
 
+
+  BEV_OPT_CLOSE_ON_FREE = 1
+  LEV_OPT_CLOSE_ON_FREE = 2
+  LEV_OPT_REUSEABLE     = 8
+  callback :accept_connection_cb, [:pointer, :uint, :pointer, :int, :pointer], :void
+  attach_function :evconnlistener_new_bind, [:pointer, :accept_connection_cb, :pointer, :uint, :int, :pointer, :int], :pointer
+
+  callback :accept_error_cb, [:pointer, :pointer], :void
+  attach_function :evconnlistener_set_error_cb, [:pointer, :accept_error_cb], :int
+  attach_function :event_base_loopexit, [:pointer, :pointer], :int
+
+  attach_function :evconnlistener_get_base, [:pointer], :pointer
+  attach_function :bufferevent_socket_new, [:pointer, :uint, :int], :pointer
+
+  callback :bev_data_cb, [:pointer, :pointer], :void
+  callback :bev_event_cb, [:pointer, :short, :pointer], :void
+  attach_function :bufferevent_setcb, [:pointer, :bev_data_cb, :bev_data_cb, :bev_event_cb, :pointer], :void
+  attach_function :bufferevent_enable, [:pointer, :short], :int
+
+  attach_function :bufferevent_get_input, [:pointer], :pointer
+  attach_function :bufferevent_get_output, [:pointer], :pointer
+  attach_function :evbuffer_add_buffer, [:pointer, :pointer], :int
+
+
+  def self.start_server(host, port, klass, *args)
+    base = Thread.current[:ev_base]
+
+    echo_read_cb = Proc.new{|bev, ctx|
+      p "receive_data"
+      # This callback is invoked when there is data to read on bev.
+      input = EM.bufferevent_get_input(bev)
+      output = EM.bufferevent_get_output(bev)
+      # Copy all the data from the input buffer to the output buffer.
+      EM.evbuffer_add_buffer(output, input)
+    }
+    echo_event_cb = Proc.new{|bev, events, ctx| p "bev_event_cb" }
+
+
+    accept_error_cb = Proc.new{|listener, ctx|
+      p "accept connection error"
+      EM.event_base_loopexit(base)
+    }
+
+    accept_conn_cb = Proc.new{|listener, fd, sockaddr, socklen, ctx|
+      p "new connection"
+      p [listener, fd, sockaddr, socklen, ctx]
+
+      # We got a new connection! Set up a bufferevent for it.
+      base = EM.evconnlistener_get_base(listener)
+      bev = EM.bufferevent_socket_new(base, fd, EM::BEV_OPT_CLOSE_ON_FREE)
+
+      EM.bufferevent_setcb(bev, echo_read_cb, nil, echo_event_cb, nil);
+      EM.bufferevent_enable(bev, EM::EV_READ|EM::EV_WRITE)
+    }
+
+
+    sin = Socket.sockaddr_in(port.to_s, host.to_s)
+    sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
+
+    listener = EM.evconnlistener_new_bind(base, accept_conn_cb, nil,
+      EM::LEV_OPT_CLOSE_ON_FREE|EM::LEV_OPT_REUSEABLE, -1, sin_ptr, sin_size)
+    EM.evconnlistener_set_error_cb(listener, accept_error_cb)
+
+    listener
+  end
+end
+
+
+EM.run do
+
+  sig = EM.start_server('127.0.0.1', 4000, nil, nil)
+
+end
+
+
+__END__
+if $0 == __FILE__
 
 EM.run do
   t1 = EM::Timer.new(2){ p "foo" }
@@ -102,6 +184,8 @@ EM.run do
     puts "the time is #{Time.now}"
     timer.cancel if (n+=1) > 2
   end
+end
+
 end
 
 
