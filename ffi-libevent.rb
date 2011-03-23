@@ -1,6 +1,6 @@
 require 'ffi'
 
-module Event
+module EventPanda
   extend FFI::Library
   ffi_lib 'event'
   attach_function :event_init, [], :int
@@ -27,6 +27,9 @@ module Event
   attach_function :event_add, [:pointer, :pointer], :int
   attach_function :event_assign, [:pointer, :pointer, :int, :int, :callback], :pointer
 
+  attach_function :event_del, [:pointer], :int
+  attach_function :event_free, [:pointer], :int
+
   EVLOOP_ONCE     = 1
   EVLOOP_NONBLOCK = 2
   EV_TIMEOUT = 1
@@ -36,6 +39,73 @@ module Event
 end
 
 
+module EventPanda
+
+  # Creates a one-time timer
+  #
+  #  timer = EventPanda::Timer.new(5) do
+  #    # this will never fire because we cancel it
+  #  end
+  #  timer.cancel
+  #
+  class Timer
+    def initialize(interval, callback=nil, base=nil, &block)
+      @signature = EventPanda.event_new(base || Thread.current[:ev_base], -1, 0, callback || block)
+      @tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [interval || 0, 0])
+      schedule!
+    end
+
+    def schedule!
+      EventPanda.event_add(@signature, @tv) if @signature
+    end
+
+    def cancel
+      #EventPanda.event_del(@signature)
+      EventPanda.event_free(@signature)
+      s = @signature.dup; @signature = nil; s
+    end
+  end
+
+  # Creates a periodic timer
+  #
+  #  n = 0
+  #  timer = EventPanda::PeriodicTimer.new(5) do
+  #    puts "the time is #{Time.now}"
+  #    timer.cancel if (n+=1) > 5
+  #  end
+  #
+  class PeriodicTimer < Timer
+    def initialize(interval, callback=nil, base=nil, &block)
+      @callback = callback || block
+      @fire = proc{ @callback.call; schedule! }
+      super(interval, @fire, base || Thread.current[:ev_base])
+    end
+  end
+
+
+  def self.run(&block)
+    base = Thread.current[:ev_base] ||= EventPanda.event_base_new
+    block.call if block; EventPanda.event_base_dispatch(base)
+  end
+end; EM = EventPanda
+
+
+EM.run do
+  t1 = EM::Timer.new(2){ p "foo" }
+  t1.cancel
+
+  i = 0
+  t2 = EM::Timer.new(1){ p "baz"; t2.schedule! if (i+=1) < 3 }
+
+  n = 0
+  timer = EM::PeriodicTimer.new(1) do
+    puts "the time is #{Time.now}"
+    timer.cancel if (n+=1) > 2
+  end
+end
+
+
+__END__
 ev1, tv = nil, nil
 
 cb_func = Proc.new{|*a| Event.event_add(ev1, tv); p ['callback', Time.now.tv_sec] }
