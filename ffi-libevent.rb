@@ -117,19 +117,34 @@ module EventPanda
   attach_function :bufferevent_get_output, [:pointer], :pointer
   attach_function :evbuffer_add_buffer, [:pointer, :pointer], :int
 
+  attach_function :evbuffer_readline, [:pointer], :string
+
 
   def self.start_server(host, port, klass, *args)
     base = Thread.current[:ev_base]
 
-    echo_read_cb = Proc.new{|bev, ctx|
-      p "receive_data"
-      # This callback is invoked when there is data to read on bev.
+    read_cb_copy = Proc.new{|bev, ctx|
+      #p "receive_data (copy)"
       input = EM.bufferevent_get_input(bev)
       output = EM.bufferevent_get_output(bev)
-      # Copy all the data from the input buffer to the output buffer.
+
+      EM.evbuffer_add_printf(output, "echo:\n")
       EM.evbuffer_add_buffer(output, input)
     }
-    echo_event_cb = Proc.new{|bev, events, ctx| p "bev_event_cb" }
+
+    read_cb_line = Proc.new{|bev, ctx|
+      #p "receive_data (line)"
+      input = EM.bufferevent_get_input(bev)
+      output = EM.bufferevent_get_output(bev)
+
+      while line = EM.evbuffer_readline(input)
+        p [Time.now.tv_sec, line]
+        EM.evbuffer_add_printf(output, "echo:\n")
+        EM.evbuffer_add_printf(output, line + "\n")
+      end
+    }
+
+    event_cb = Proc.new{|bev, events, ctx| p "bev_event_cb" }
 
 
     accept_error_cb = Proc.new{|listener, ctx|
@@ -137,15 +152,14 @@ module EventPanda
       EM.event_base_loopexit(base)
     }
 
-    accept_conn_cb = Proc.new{|listener, fd, sockaddr, socklen, ctx|
-      p "new connection"
-      p [listener, fd, sockaddr, socklen, ctx]
+    accept_conn_cb = Proc.new{|listener, fd, sockaddr_ptr, socklen, ctx|
+      sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
+      p ["new connection", sockaddr, fd]
 
-      # We got a new connection! Set up a bufferevent for it.
       base = EM.evconnlistener_get_base(listener)
       bev = EM.bufferevent_socket_new(base, fd, EM::BEV_OPT_CLOSE_ON_FREE)
 
-      EM.bufferevent_setcb(bev, echo_read_cb, nil, echo_event_cb, nil);
+      EM.bufferevent_setcb(bev, read_cb_line, nil, event_cb, nil);
       EM.bufferevent_enable(bev, EM::EV_READ|EM::EV_WRITE)
     }
 
@@ -162,10 +176,17 @@ module EventPanda
 end
 
 
+#trap("INT"){ p "shutdown"; exit }
+
 EM.run do
+  timer = EM::PeriodicTimer.new(3){  Time.now.tv_sec }
 
-  sig = EM.start_server('127.0.0.1', 4000, nil, nil)
+  class C
+    def receive_data(data)
+    end
+  end
 
+  EM.start_server('127.0.0.1', 4000, C)
 end
 
 
