@@ -50,6 +50,7 @@ module EventPanda
   callback :bev_event_cb, [:pointer, :short, :pointer], :void
   attach_function :bufferevent_setcb, [:pointer, :bev_data_cb, :bev_data_cb, :bev_event_cb, :pointer], :void
   attach_function :bufferevent_enable, [:pointer, :short], :int
+  attach_function :bufferevent_disable, [:pointer], :int
   attach_function :bufferevent_get_input, [:pointer], :pointer
   attach_function :bufferevent_get_output, [:pointer], :pointer
 
@@ -80,7 +81,11 @@ module EventPanda
   end
   ffi_lib_global 'event_core', 'event_openssl'
   attach_function :bufferevent_openssl_socket_new, [:pointer, :uint, :pointer, :uint, :uint], :pointer
+  attach_function :bufferevent_openssl_filter_new, [:pointer, :pointer, :pointer, :uint, :uint], :pointer
 
+
+  BUFFEREVENT_SSL_ACCEPTING = 2
+  BEV_OPT_DEFER_CALLBACKS = 4
 
   LEV_OPT_CLOSE_ON_FREE = 2
   LEV_OPT_REUSEABLE     = 8
@@ -207,8 +212,26 @@ module EventPanda
       end
     end
 
-    def start_tls(verify=false)
-      raise 'implement start_tls'
+    def start_tls(opts={})
+      if opts[:private_key_file] && opts[:cert_chain_file]
+        ssl = SSL.SSL_new(EventPanda::SSL.get_ctx)
+        raise "ssl error (SSL_new pointer is null)" if ssl.null?
+
+        SSL.SSL_use_certificate_file(ssl, opts[:cert_chain_file], SSL::SSL_FILETYPE_PEM)
+        SSL.SSL_use_PrivateKey_file(ssl, opts[:private_key_file], SSL::SSL_FILETYPE_PEM)
+
+        EventPanda.bufferevent_disable(@bev)
+        @bev_plain = @bev
+
+        @bev = EventPanda.bufferevent_openssl_filter_new(Thread.current[:ev_base], @bev_plain, ssl,
+          EventPanda::BUFFEREVENT_SSL_ACCEPTING, EventPanda::BEV_OPT_CLOSE_ON_FREE|EventPanda::BEV_OPT_DEFER_CALLBACKS)
+        init_bev # re-assign @bev_*
+
+        @use_ssl = true
+
+      elsif opts[:verify_peer] == true
+        # ..
+      end
     end
   end
 
@@ -285,41 +308,7 @@ module EventPanda
     def self.get_ctx; Thread.current[:ssl_ctx] ||= (init; SSL_CTX_new(SSLv23_server_method())); end
   end
 
-  BUFFEREVENT_SSL_ACCEPTING = 2
-  BEV_OPT_DEFER_CALLBACKS = 4
-
-  class TcpServer_SSL < TcpServer
-    def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
-      sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
-      p ["new ssl connection", fd, sockaddr]
-
-      base = EventPanda.evconnlistener_get_base(listener)
-
-      ssl = SSL.SSL_new(EventPanda::SSL.get_ctx)
-      raise "ssl error (SSL_new pointer is null)" if ssl.null?
-
-      SSL.SSL_use_certificate_file(ssl, "client.crt", SSL::SSL_FILETYPE_PEM)
-      SSL.SSL_use_PrivateKey_file(ssl, "client.key", SSL::SSL_FILETYPE_PEM)
-
-      bev = EventPanda.bufferevent_openssl_socket_new(Thread.current[:ev_base], fd, ssl,
-        EventPanda::BUFFEREVENT_SSL_ACCEPTING, EventPanda::BEV_OPT_CLOSE_ON_FREE|EventPanda::BEV_OPT_DEFER_CALLBACKS)
-
-      if !bev.null?
-        conn = @klass.new(*@klass_args).init_connection(fd, sockaddr, bev)
-        conn.post_init
-        conn.instance_eval{ @use_ssl = true }
-        conn
-      end
-    end
-  end
-
-
-  def self.start_server_ssl(host, port, klass, *args)
-    EventPanda::TcpServer_SSL.new(Thread.current[:ev_base], host, port, klass, args)
-  end
-
-
-  class TcpConnection
+  class TcpClient_Connection
     def self.create(base, host, port, klass, klass_args)
       sin = Socket.sockaddr_in(port.to_s, host.to_s)
       sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
@@ -335,7 +324,7 @@ module EventPanda
   end
 
   def self.connect(host, port, klass, *args)
-    EventPanda::TcpConnection.create(Thread.current[:ev_base], host, port, klass, args)
+    EventPanda::TcpClient_Connection.create(Thread.current[:ev_base], host, port, klass, args)
   end
 
   def self.stop(base=nil, interval=nil)
@@ -352,9 +341,11 @@ if $0 == __FILE__
 
     # place a client.crt and client.key files inside your directory and run eventpanda.rb
     # then try to connect with % openssl s_client -connect localhost:4000
-    class TestServer < EM::Connection
+    class SSL_TestServer < EM::Connection
       def post_init
         p ['server post_init', @fd, @sockaddr, 'got new client connection']
+        start_tls(:private_key_file => 'client.key', :cert_chain_file => 'client.crt')
+        send_data "\n" + ("A" * 1024) + "\n"
       end
 
       def receive_data(data)
@@ -367,7 +358,7 @@ if $0 == __FILE__
       end
     end
 
-    EM.start_server_ssl("127.0.0.1", 4000, TestServer)
+    EM.start_server("127.0.0.1", 4000, SSL_TestServer)
   end
 end
 
