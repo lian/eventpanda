@@ -53,18 +53,19 @@ module EventPanda
   attach_function :bufferevent_get_output, [:pointer], :pointer
 
   # evhttp
-  #   request_handler = Proc.new{|req, arg|
-  #     buf = Event.evbuffer_new
-  #     Event.evbuffer_add_printf(buf, "Thanks for the request!")
-  #     Event.evhttp_send_reply(req, 200, "Client", buf)
-  #     Event.evbuffer_free(buf)
-  #   }
-  #   http = Event.evhttp_start('127.0.0.1', 8000)
-  #   Event.evhttp_set_gencb(http, request_handler, nil)
   attach_function :evhttp_start, [:string, :int], :pointer
   callback :evhttp_callback, [:pointer, :pointer], :void
   attach_function :evhttp_set_gencb, [:pointer, :evhttp_callback, :pointer], :int
   attach_function :evhttp_send_reply, [:pointer, :int, :string, :pointer], :int
+
+
+  attach_function :evbuffer_write, [:pointer, :uint], :int
+  attach_function :evbuffer_write_atmost, [:pointer, :uint, :uint], :int
+  attach_function :evbuffer_read, [:pointer, :uint, :int], :int
+  attach_function :evbuffer_get_length, [:pointer], :int
+
+  attach_function :bufferevent_read, [:pointer, :pointer, :uint], :int
+  attach_function :bufferevent_write, [:pointer, :pointer, :uint], :int
 
 
   LEV_OPT_CLOSE_ON_FREE = 2
@@ -135,107 +136,81 @@ module EventPanda # Timers
 end
 
 
-module EventPanda # tcp server
+module EventPanda
 
-  def self.start_server(host, port, klass, *args)
-    base = Thread.current[:ev_base]
+  class Connection
+    def initialize(*args)
+      #p args
+    end
 
-    read_cb_copy = Proc.new{|bev, ctx|
-      #p "receive_data (copy)"
-      input = EM.bufferevent_get_input(bev)
-      output = EM.bufferevent_get_output(bev)
+    def init_connection(fd, sockaddr, bev)
+      @fd, @sockaddr, @bev = fd, sockaddr, bev
 
-      EM.evbuffer_add_printf(output, "echo:\n")
-      EM.evbuffer_add_buffer(output, input)
-    }
+      EventPanda.bufferevent_setcb(@bev, method(:read_cb), nil, method(:event_cb), nil)
+      EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
 
-    read_cb_line = Proc.new{|bev, ctx|
-      #p "receive_data (line)"
-      input = EM.bufferevent_get_input(bev)
-      output = EM.bufferevent_get_output(bev)
+      @bev_input  = EventPanda.bufferevent_get_input(@bev)
+      @bev_output = EventPanda.bufferevent_get_output(@bev)
+      @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096 / 2)
 
-      while line = EM.evbuffer_readline(input)
-        p [Time.now.tv_sec, line]
-        EM.evbuffer_add_printf(output, "echo:\n")
-        EM.evbuffer_add_printf(output, line + "\n")
-      end
-    }
+      self
+    end
 
-    event_cb = Proc.new{|bev, events, ctx| p "bev_event_cb" }
+    def send_data(data)
+      length = data.size
+      #length = @bev_tmp.size if length > @bev_tmp.size
+      EventPanda.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
+    end
 
+    def read_cb(bev, ctx)
+      length = EventPanda.evbuffer_get_length(@bev_input)
+      #length = @bev_tmp.size if length > @bev_tmp.size
+      EventPanda.bufferevent_read(@bev, @bev_tmp, length)
+      receive_data(@bev_tmp.read_string(length))
+    end
 
-    accept_error_cb = Proc.new{|listener, ctx|
+    def event_cb(bev, events, ctx)
+      p ["bev_event_cb", events]
+      unbind
+    end
+  end
+
+  class TcpServer
+    def initialize(base, host, port, klass, klass_args)
+      @klass, @klass_args = klass, klass_args
+      @host, @port = host, port
+
+      sin = Socket.sockaddr_in(port.to_s, host.to_s)
+      sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
+
+      _base = base || Thread.current[:ev_base]
+      @listen = EventPanda.evconnlistener_new_bind(_base, method(:accept_connection), nil,
+      EventPanda::LEV_OPT_CLOSE_ON_FREE|EventPanda::LEV_OPT_REUSEABLE, -1, sin_ptr, sin_size)
+      EventPanda.evconnlistener_set_error_cb(@listen, method(:accept_error))
+    end
+
+    def accept_error(lisener, ctx)
       p "accept connection error"
       EM.event_base_loopexit(base)
-    }
+    end
 
-    accept_conn_cb = Proc.new{|listener, fd, sockaddr_ptr, socklen, ctx|
+    def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
       sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
       p ["new connection", sockaddr, fd]
 
-      base = EM.evconnlistener_get_base(listener)
-      bev = EM.bufferevent_socket_new(base, fd, EM::BEV_OPT_CLOSE_ON_FREE)
+      base = EventPanda.evconnlistener_get_base(listener)
+      bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
 
-      EM.bufferevent_setcb(bev, read_cb_line, nil, event_cb, nil);
-      EM.bufferevent_enable(bev, EM::EV_READ|EM::EV_WRITE)
-    }
+      if !bev.null?
+        conn = @klass.new(*@klass_args).init_connection(fd, sockaddr, bev)
+      end
+    end
+  end
 
-
-    sin = Socket.sockaddr_in(port.to_s, host.to_s)
-    sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
-
-    listener = EM.evconnlistener_new_bind(base, accept_conn_cb, nil,
-      EM::LEV_OPT_CLOSE_ON_FREE|EM::LEV_OPT_REUSEABLE, -1, sin_ptr, sin_size)
-    EM.evconnlistener_set_error_cb(listener, accept_error_cb)
-
-    listener
+  def self.start_server(host, port, klass, *args)
+    EventPanda::TcpServer.new(base = Thread.current[:ev_base], host, port, klass, args)
   end
 end
-
-
-module FFI::OpenSSL
-  extend FFI::Library
-  ffi_lib 'ssl'
-
-  attach_function :SSL_library_init, [], :int
-  attach_function :ERR_load_crypto_strings, [], :void
-  attach_function :SSL_load_error_strings, [], :void
-  #attach_function :OpenSSL_add_all_algorithms, [], :int
-  attach_function :RAND_poll, [], :int
-  attach_function :SSLv23_server_method, [], :pointer
-  attach_function :SSL_CTX_new, [:pointer], :pointer
-  attach_function :SSL_CTX_use_certificate_file, [:pointer, :string, :int], :int
-  attach_function :SSL_CTX_use_PrivateKey_file, [:pointer, :string, :int], :int
-  attach_function :SSL_CTX_set_verify, [:pointer, :uint, :pointer], :void
-  callback        :SSLX_CTX_verify_callback, [:pointer, :pointer], :void
-  attach_function :SSL_CTX_set_cert_verify_callback, [:pointer, :SSLX_CTX_verify_callback, :pointer], :void
-
-  SSL_FILETYPE_PEM = 1
-  SSL_VERIFY_NONE = 0
-  SSL_VERIFY_PEER = 1
-  SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 2
-
-  def self.init
-    FFI::OpenSSL.SSL_library_init
-    FFI::OpenSSL.ERR_load_crypto_strings
-    FFI::OpenSSL.SSL_load_error_strings
-    #p FFI::OpenSSL.OpenSSL_add_all_algorithms
-    FFI::OpenSSL.RAND_poll
-
-    p sctx = FFI::OpenSSL.SSL_CTX_new(FFI::OpenSSL.SSLv23_server_method)
-
-    p FFI::OpenSSL.SSL_CTX_use_certificate_file(sctx, "crt.pem", FFI::OpenSSL::SSL_FILETYPE_PEM)
-    p FFI::OpenSSL.SSL_CTX_use_PrivateKey_file(sctx, "pvk.pem", FFI::OpenSSL::SSL_FILETYPE_PEM)
-
-    #FFI::OpenSSL.SSL_CTX_set_verify(sctx, FFI::OpenSSL::SSL_VERIFY_NONE, nil)
-    FFI::OpenSSL.SSL_CTX_set_verify(sctx, FFI::OpenSSL::SSL_VERIFY_PEER|FFI::OpenSSL::SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nil)
-
-    verify_callback = Proc.new{|x509_ctx, arg| p ['verify callback'] }
-    FFI::OpenSSL.SSL_CTX_set_cert_verify_callback(sctx, verify_callback, nil)
-    true
-  end
-end
-
 
 
 
@@ -244,12 +219,19 @@ if $0 == __FILE__
 
     timer = EM::PeriodicTimer.new(3){  p [Time.now.tv_sec] }
 
-    class C
+    class TestServer < EM::Connection
       def receive_data(data)
+        p ['receive_data', @fd, @sockaddr, data]
+
+        send_data(data)
+      end
+
+      def unbind
+        p ['unbind', @fd, @sockaddr]
       end
     end
 
-    EM.start_server('127.0.0.1', 4000, C)
+    EM.start_server('127.0.0.1', 4000, TestServer)
 
   end
 end
