@@ -67,6 +67,11 @@ module EventPanda
   attach_function :bufferevent_read, [:pointer, :pointer, :uint], :int
   attach_function :bufferevent_write, [:pointer, :pointer, :uint], :int
 
+  attach_function :bufferevent_socket_connect, [:pointer, :pointer, :uint], :int
+  # bev = bufferevent_openssl_socket_new(ev_base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
+  attach_function :event_get_fd, [:pointer], :int
+  attach_function :bufferevent_getfd, [:pointer], :int
+  attach_function :bufferevent_free, [:pointer], :int
 
   LEV_OPT_CLOSE_ON_FREE = 2
   LEV_OPT_REUSEABLE     = 8
@@ -99,7 +104,8 @@ module EventPanda # Timers
   #
   class Timer
     def initialize(interval, callback=nil, base=nil, &block)
-      @signature = EventPanda.event_new(base || Thread.current[:ev_base], -1, 0, callback || block)
+      @block = callback || block
+      @signature = EventPanda.event_new(base || Thread.current[:ev_base], -1, 0, @block)
       @tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [interval || 0, 0])
       schedule!
     end
@@ -109,9 +115,8 @@ module EventPanda # Timers
     end
 
     def cancel
-      #EventPanda.event_del(@signature)
       EventPanda.event_free(@signature)
-      s = @signature.dup; @signature = nil; s
+      @signature, @tv, @block = nil, nil, nil
     end
   end
 
@@ -126,8 +131,8 @@ module EventPanda # Timers
   class PeriodicTimer < Timer
     def initialize(interval, callback=nil, base=nil, &block)
       @callback = callback || block
-      @fire = proc{ @callback.call; schedule! }
-      super(interval, @fire, base)
+      cb = proc{ @callback.call; schedule! }
+      super(interval, cb, base)
     end
   end
 
@@ -156,6 +161,12 @@ module EventPanda
       self
     end
 
+    def post_init; end
+
+    def close_connection
+      unbind; EventPanda.bufferevent_free(@bev)
+    end
+
     def send_data(data)
       length = data.size
       #length = @bev_tmp.size if length > @bev_tmp.size
@@ -170,8 +181,14 @@ module EventPanda
     end
 
     def event_cb(bev, events, ctx)
-      p ["bev_event_cb", events]
-      unbind
+      case events
+        when 128 # connected (only happens on #connect)
+          @fd = EventPanda.bufferevent_getfd(@bev) # update fd ivar
+          post_init
+        when 17  # connection closed
+          unbind
+        else p ["unkown event_cb", events]
+      end
     end
   end
 
@@ -191,47 +208,95 @@ module EventPanda
 
     def accept_error(lisener, ctx)
       p "accept connection error"
-      EM.event_base_loopexit(base)
+      #EM.event_base_loopexit(base)
     end
 
     def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
       sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
-      p ["new connection", sockaddr, fd]
+      p ["new connection", fd, sockaddr]
 
       base = EventPanda.evconnlistener_get_base(listener)
       bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
 
       if !bev.null?
         conn = @klass.new(*@klass_args).init_connection(fd, sockaddr, bev)
+        conn.post_init
+        conn
       end
     end
   end
 
   def self.start_server(host, port, klass, *args)
-    EventPanda::TcpServer.new(base = Thread.current[:ev_base], host, port, klass, args)
+    EventPanda::TcpServer.new(Thread.current[:ev_base], host, port, klass, args)
+  end
+
+
+
+  class TcpConnection
+    def self.create(base, host, port, klass, klass_args)
+      sin = Socket.sockaddr_in(port.to_s, host.to_s)
+      sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
+      _base = base || Thread.current[:ev_base]
+
+      bev = EventPanda.bufferevent_socket_new(_base, -1, EventPanda::BEV_OPT_CLOSE_ON_FREE)
+
+      if !bev.null?
+        conn = klass.new(*klass_args).init_connection(-1, [host, port], bev)
+        EventPanda.bufferevent_socket_connect(bev, sin_ptr, sin_size)
+      end
+    end
+  end
+
+  def self.connect(host, port, klass, *args)
+    EventPanda::TcpConnection.create(Thread.current[:ev_base], host, port, klass, args)
+  end
+
+  def self.stop(base=nil, interval=nil)
+    EventPanda.event_base_loopexit(base || Thread.current[:ev_base], nil)
   end
 end
-
 
 
 if $0 == __FILE__
   EM.run do
 
-    timer = EM::PeriodicTimer.new(3){  p [Time.now.tv_sec] }
+    timer = EM::PeriodicTimer.new(1){  p [Time.now.tv_sec] }
 
     class TestServer < EM::Connection
-      def receive_data(data)
-        p ['receive_data', @fd, @sockaddr, data]
+      def post_init
+        p ['server post_init', @fd, @sockaddr, 'got new client connection']
+      end
 
+      def receive_data(data)
+        p ['server receive_data', @fd, @sockaddr, data]
         send_data(data)
       end
 
       def unbind
-        p ['unbind', @fd, @sockaddr]
+        p ['server unbind', @fd, @sockaddr]
+
+        EM::add_timer(3){ EM.stop }
+      end
+    end
+
+    class TestClient < EM::Connection
+      def post_init
+        p ['client post_init', @fd, @sockaddr]
+        send_data("hi\n")
+      end
+
+      def receive_data(data)
+        p ['client receive_data', @fd, @sockaddr, data]
+        close_connection
+      end
+
+      def unbind
+        p ['client unbind', @fd, @sockaddr]
       end
     end
 
     EM.start_server('127.0.0.1', 4000, TestServer)
 
+    EM.connect('127.0.0.1', 4000, TestClient)
   end
 end
