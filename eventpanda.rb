@@ -193,6 +193,51 @@ module EventPanda # tcp server
 end
 
 
+module FFI::OpenSSL
+  extend FFI::Library
+  ffi_lib 'ssl'
+
+  attach_function :SSL_library_init, [], :int
+  attach_function :ERR_load_crypto_strings, [], :void
+  attach_function :SSL_load_error_strings, [], :void
+  #attach_function :OpenSSL_add_all_algorithms, [], :int
+  attach_function :RAND_poll, [], :int
+  attach_function :SSLv23_server_method, [], :pointer
+  attach_function :SSL_CTX_new, [:pointer], :pointer
+  attach_function :SSL_CTX_use_certificate_file, [:pointer, :string, :int], :int
+  attach_function :SSL_CTX_use_PrivateKey_file, [:pointer, :string, :int], :int
+  attach_function :SSL_CTX_set_verify, [:pointer, :uint, :pointer], :void
+  callback        :SSLX_CTX_verify_callback, [:pointer, :pointer], :void
+  attach_function :SSL_CTX_set_cert_verify_callback, [:pointer, :SSLX_CTX_verify_callback, :pointer], :void
+
+  SSL_FILETYPE_PEM = 1
+  SSL_VERIFY_NONE = 0
+  SSL_VERIFY_PEER = 1
+  SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 2
+
+  def self.init
+    FFI::OpenSSL.SSL_library_init
+    FFI::OpenSSL.ERR_load_crypto_strings
+    FFI::OpenSSL.SSL_load_error_strings
+    #p FFI::OpenSSL.OpenSSL_add_all_algorithms
+    FFI::OpenSSL.RAND_poll
+
+    p sctx = FFI::OpenSSL.SSL_CTX_new(FFI::OpenSSL.SSLv23_server_method)
+
+    p FFI::OpenSSL.SSL_CTX_use_certificate_file(sctx, "crt.pem", FFI::OpenSSL::SSL_FILETYPE_PEM)
+    p FFI::OpenSSL.SSL_CTX_use_PrivateKey_file(sctx, "pvk.pem", FFI::OpenSSL::SSL_FILETYPE_PEM)
+
+    #FFI::OpenSSL.SSL_CTX_set_verify(sctx, FFI::OpenSSL::SSL_VERIFY_NONE, nil)
+    FFI::OpenSSL.SSL_CTX_set_verify(sctx, FFI::OpenSSL::SSL_VERIFY_PEER|FFI::OpenSSL::SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nil)
+
+    verify_callback = Proc.new{|x509_ctx, arg| p ['verify callback'] }
+    FFI::OpenSSL.SSL_CTX_set_cert_verify_callback(sctx, verify_callback, nil)
+    true
+  end
+end
+
+
+
 
 if $0 == __FILE__
   EM.run do
