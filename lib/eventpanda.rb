@@ -40,6 +40,9 @@ module EventPanda
   callback :accept_connection_cb, [:pointer, :uint, :pointer, :int, :pointer], :void
   attach_function :evconnlistener_set_error_cb, [:pointer, :accept_error_cb], :int
   attach_function :evconnlistener_new_bind, [:pointer, :accept_connection_cb, :pointer, :uint, :int, :pointer, :int], :pointer
+  attach_function :evconnlistener_free, [:pointer], :void
+  attach_function :evconnlistener_enable, [:pointer], :int
+  attach_function :evconnlistener_disable, [:pointer], :int
 
   # new connection
   attach_function :evconnlistener_get_base, [:pointer], :pointer
@@ -72,16 +75,6 @@ module EventPanda
   attach_function :event_get_fd, [:pointer], :int
   attach_function :bufferevent_getfd, [:pointer], :int
   attach_function :bufferevent_free, [:pointer], :int
-
-
-  # libevent_openssl requires a symbol from libevent_core.so. we load them as global so they see each other.
-  def self.ffi_lib_global(*names)
-    @ffi_lib_flags = FFI::DynamicLibrary::RTLD_LAZY | FFI::DynamicLibrary::RTLD_GLOBAL # instead of RTLD::LOCAL
-    ffi_lib(*names)
-  end
-  ffi_lib_global 'event_core', 'event_openssl'
-  attach_function :bufferevent_openssl_socket_new, [:pointer, :uint, :pointer, :uint, :uint], :pointer
-  attach_function :bufferevent_openssl_filter_new, [:pointer, :pointer, :pointer, :uint, :uint], :pointer
 
 
   BUFFEREVENT_SSL_ACCEPTING = 2
@@ -158,10 +151,6 @@ end
 module EventPanda
 
   class Connection
-    def initialize(*args)
-      #p args
-    end
-
     def init_connection(fd, sockaddr, bev)
       @fd, @sockaddr, @bev = fd, sockaddr, bev
       init_bev if @bev
@@ -169,7 +158,7 @@ module EventPanda
     end
 
     def init_bev
-      EventPanda.bufferevent_setcb(@bev, method(:read_cb), nil, method(:event_cb), nil)
+      EventPanda.bufferevent_setcb(@bev, method(:_data_cb), nil, method(:_event_cb), nil)
       EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
 
       @bev_input  = EventPanda.bufferevent_get_input(@bev)
@@ -177,10 +166,13 @@ module EventPanda
       @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096 / 2)
     end
 
+    def initialize(*args); end
     def post_init; end
+    def receive_data(data); end
+    def unbind; end
 
     def close_connection
-      unbind; EventPanda.bufferevent_free(@bev)
+      EventPanda.bufferevent_free(@bev); unbind
     end
 
     def send_data(data)
@@ -189,14 +181,14 @@ module EventPanda
       EventPanda.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
     end
 
-    def read_cb(bev, ctx)
+    def _data_cb(bev, ctx)
       length = EventPanda.evbuffer_get_length(@bev_input)
       #length = @bev_tmp.size if length > @bev_tmp.size
       EventPanda.bufferevent_read(@bev, @bev_tmp, length)
       receive_data(@bev_tmp.read_string(length))
     end
 
-    def event_cb(bev, events, ctx)
+    def _event_cb(bev, events, ctx)
       case events
         when 128 # connected (happens only with #connect or ssl)
           unless @use_ssl # with ssl dont run post_init again. accept_connection does this.
@@ -208,35 +200,24 @@ module EventPanda
           unbind
         when 17  # connection closed
           unbind
-        else p ["unkown ssl event_cb", events]
+        else p ["unkown _event_cb", events]
       end
     end
 
-    def start_tls(opts={})
-      if opts[:private_key_file] && opts[:cert_chain_file]
-        ssl = SSL.SSL_new(EventPanda::SSL.get_ctx)
-        raise "ssl error (SSL_new pointer is null)" if ssl.null?
-
-        SSL.SSL_use_certificate_file(ssl, opts[:cert_chain_file], SSL::SSL_FILETYPE_PEM)
-        SSL.SSL_use_PrivateKey_file(ssl, opts[:private_key_file], SSL::SSL_FILETYPE_PEM)
-
-        EventPanda.bufferevent_disable(@bev)
-        @bev_plain = @bev
-
-        @bev = EventPanda.bufferevent_openssl_filter_new(Thread.current[:ev_base], @bev_plain, ssl,
-          EventPanda::BUFFEREVENT_SSL_ACCEPTING, EventPanda::BEV_OPT_CLOSE_ON_FREE|EventPanda::BEV_OPT_DEFER_CALLBACKS)
-        init_bev # re-assign @bev_*
-
-        @use_ssl = true
-
-      elsif opts[:verify_peer] == true
-        # ..
+    def method_missing(*a)
+      if a.first == :start_tls
+        self.extend EventPanda::SSL::ConnectionMethods
+        send(*a)
+      else
+        super(*a)
       end
     end
   end
 
+  autoload :SSL, "eventpanda/ssl"
 
-  class TcpServer
+  module TCP
+  class Server
     def initialize(base, host, port, klass, klass_args)
       @klass, @klass_args = klass, klass_args
       @host, @port = host, port
@@ -256,8 +237,8 @@ module EventPanda
     end
 
     def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
+      #p ["new connection", fd, sockaddr]
       sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
-      p ["new connection", fd, sockaddr]
 
       base = EventPanda.evconnlistener_get_base(listener)
       bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
@@ -268,48 +249,14 @@ module EventPanda
         conn
       end
     end
-  end
 
-  def self.start_server(host, port, klass, *args)
-    EventPanda::TcpServer.new(Thread.current[:ev_base], host, port, klass, args)
-  end
-
-
-  module SSL
-    extend FFI::Library
-    ffi_lib 'ssl'
-
-    attach_function :SSL_library_init, [], :int
-    attach_function :ERR_load_crypto_strings, [], :void
-    attach_function :SSL_load_error_strings, [], :void
-    attach_function :RAND_poll, [], :int
-    attach_function :SSLv23_server_method, [], :pointer
-    attach_function :SSL_CTX_new, [:pointer], :pointer
-    attach_function :SSL_new, [:pointer], :pointer
-    attach_function :SSL_use_certificate_file, [:pointer, :string, :int], :int
-    attach_function :SSL_use_PrivateKey_file, [:pointer, :string, :int], :int
-
-    SSL_FILETYPE_PEM = 1
-    SSL_VERIFY_NONE = 0
-    SSL_VERIFY_PEER = 1
-    SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 2
-
-    def self.init
-      return if Thread.current[:ssl_ctx]
-      SSL.SSL_library_init
-      SSL.ERR_load_crypto_strings
-      SSL.SSL_load_error_strings
-      #p SSL.OpenSSL_add_all_algorithms
-      SSL.RAND_poll
-
-      Thread.current[:ssl_ctx] = SSL.SSL_CTX_new(SSL.SSLv23_server_method)
+    def close
+      EventPanda.evconnlistener_free(@listen); @listen = nil
     end
-
-    def self.get_ctx; Thread.current[:ssl_ctx] ||= (init; SSL_CTX_new(SSLv23_server_method())); end
   end
 
-  class TcpClient_Connection
-    def self.create(base, host, port, klass, klass_args)
+  class Client
+    def self.new(base, host, port, klass, klass_args)
       sin = Socket.sockaddr_in(port.to_s, host.to_s)
       sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
       _base = base || Thread.current[:ev_base]
@@ -319,16 +266,31 @@ module EventPanda
       if !bev.null?
         conn = klass.new(*klass_args).init_connection(-1, [host, port], bev)
         EventPanda.bufferevent_socket_connect(bev, sin_ptr, sin_size)
+        conn
       end
     end
   end
-
-  def self.connect(host, port, klass, *args)
-    EventPanda::TcpClient_Connection.create(Thread.current[:ev_base], host, port, klass, args)
   end
 
-  def self.stop(base=nil, interval=nil)
-    EventPanda.event_base_loopexit(base || Thread.current[:ev_base], nil)
+
+  def self.start_server(host, port, klass, *args)
+    EventPanda::TCP::Server.new(Thread.current[:ev_base], host, port, klass, args)
+  end
+
+  def self.connect(host, port, klass, *args)
+    EventPanda::TCP::Client.new(Thread.current[:ev_base], host, port, klass, args)
+  end
+
+  def self.stop(_base=nil, interval=nil)
+    base = _base || Thread.current[:ev_base]
+    EventPanda.event_base_loopexit(base, nil)
+    Thread.current[:ev_base] = nil unless base; true
+  end
+
+  def self.free_base(_base=nil)
+    base = _base || Thread.current[:ev_base]
+    EventPanda.event_base_free(base)
+    Thread.current[:ev_base] = nil unless base; true
   end
 end
 
@@ -339,13 +301,13 @@ if $0 == __FILE__
     timer = EM::PeriodicTimer.new(1){  p [Time.now.tv_sec] }
 
 
-    # place a client.crt and client.key files inside your directory and run eventpanda.rb
-    # then try to connect with % openssl s_client -connect localhost:4000
     class SSL_TestServer < EM::Connection
       def post_init
-        p ['server post_init', @fd, @sockaddr, 'got new client connection']
-        start_tls(:private_key_file => 'client.key', :cert_chain_file => 'client.crt')
-        send_data "\n" + ("A" * 1024) + "\n"
+        p ['server post_init', @fd, @sockaddr, 'new client connection']
+        start_tls(
+          :private_key_file => File.join(File.dirname(__FILE__), '../spec/eventpanda/client.key'),
+          :cert_chain_file  => File.join(File.dirname(__FILE__), '../spec/eventpanda/client.crt')
+        )
       end
 
       def receive_data(data)
@@ -361,6 +323,7 @@ if $0 == __FILE__
     EM.start_server("127.0.0.1", 4000, SSL_TestServer)
   end
 end
+
 
 
 __END__
