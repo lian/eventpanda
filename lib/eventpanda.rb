@@ -89,11 +89,37 @@ module EventPanda
   EV_PERSIST = 10
 
 
+  # bufferevent thread locking
+  # @ffi_lib_flags = FFI::DynamicLibrary::RTLD_LAZY | FFI::DynamicLibrary::RTLD_GLOBAL
+  # ffi_lib 'event_core', 'event_pthreads'
+  # @ffi_lib_flags = nil
+  # attach_function :bufferevent_lock, [:pointer], :int
+
+
   def self.run(&block)
-    base = Thread.current[:ev_base] ||= EventPanda.event_base_new
-    block.call(base) if block
-    EventPanda.event_base_dispatch(base)
-    #loop{ Event.event_base_loop(base, 2); sleep(0.01) }
+    Thread.current[:ev_base] ||= EventPanda.event_base_new
+    base = Thread.current[:ev_base]
+    
+    block.call if block
+    EventPanda.event_base_loop(Thread.current[:ev_base], 0)
+
+    Thread.current[:ev_base] = nil
+    #EventPanda.event_base_free(base); base = nil
+    true
+  end
+
+  def self.stop
+    close_running_listeners!
+    EventPanda.event_base_loopexit(Thread.current[:ev_base], nil)
+  end
+
+  def self.close_running_listeners!
+    if Thread.current[:ev_base_lvs]
+      Thread.current[:ev_base_lvs].each(&:close!)
+      Thread.current[:ev_base_lvs].clear
+    end
+    #Thread.current[:ev_base_cvs].each(&:close_connection)
+    #Thread.current[:ev_base_cvs].clear
   end
 
   ::EM = EventPanda
@@ -138,8 +164,8 @@ module EventPanda # Timers
   class PeriodicTimer < Timer
     def initialize(interval, callback=nil, base=nil, &block)
       @callback = callback || block
-      cb = proc{ @callback.call; schedule! }
-      super(interval, cb, base)
+      @cb = proc{ @callback.call; schedule! }
+      super(interval, @cb, base)
     end
   end
 
@@ -158,7 +184,8 @@ module EventPanda
     end
 
     def init_bev
-      EventPanda.bufferevent_setcb(@bev, method(:_data_cb), nil, method(:_event_cb), nil)
+      EventPanda.bufferevent_setcb(@bev,
+        @_data_cb = method(:_data_cb), nil, @_event_cb = method(:_event_cb), nil)
       EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
 
       @bev_input  = EventPanda.bufferevent_get_input(@bev)
@@ -198,9 +225,14 @@ module EventPanda
           #init_ssl_for_connection if @use_ssl # post_init can set @use_ssl
         when 32  # ssl connection closed
           unbind
+        when 33  # ?
+          p ["event_cb", events]
+          # close_connection
         when 17  # connection closed
           unbind
-        else p ["unkown _event_cb", events]
+        else
+          p ["unkown event_cb", events]
+          #close_connection
       end
     end
 
@@ -216,19 +248,24 @@ module EventPanda
 
   autoload :SSL, "eventpanda/ssl"
 
+  attach_function :event_enable_debug_mode, [], :void
+
   module TCP
   class Server
     def initialize(base, host, port, klass, klass_args)
       @klass, @klass_args = klass, klass_args
       @host, @port = host, port
 
-      sin = Socket.sockaddr_in(port.to_s, host.to_s)
-      sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
+      @sin = Socket.sockaddr_in(port.to_s, host.to_s)
+      @sin_ptr, @sin_size = FFI::MemoryPointer.from_string(@sin), @sin.size
 
-      _base = base || Thread.current[:ev_base]
-      @listen = EventPanda.evconnlistener_new_bind(_base, method(:accept_connection), nil,
-      EventPanda::LEV_OPT_CLOSE_ON_FREE|EventPanda::LEV_OPT_REUSEABLE, -1, sin_ptr, sin_size)
+      @base = base || Thread.current[:ev_base]
+      @listen = EventPanda.evconnlistener_new_bind(@base, method(:accept_connection), nil,
+        EventPanda::LEV_OPT_CLOSE_ON_FREE|EventPanda::LEV_OPT_REUSEABLE, -1, @sin_ptr, @sin_size)
       EventPanda.evconnlistener_set_error_cb(@listen, method(:accept_error))
+
+      #Thread.current[:ev_base_lvs] ||= []
+      #Thread.current[:ev_base_lvs] << self
     end
 
     def accept_error(lisener, ctx)
@@ -237,9 +274,10 @@ module EventPanda
     end
 
     def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
-      #p ["new connection", fd, sockaddr]
       sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
+      p ["new connection", fd, sockaddr]
 
+#=begin
       base = EventPanda.evconnlistener_get_base(listener)
       bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
 
@@ -248,30 +286,37 @@ module EventPanda
         conn.post_init
         conn
       end
+#=end
     end
 
-    def close
+    def close! # shutdown tcp server
       EventPanda.evconnlistener_free(@listen); @listen = nil
     end
   end
 
+
   class Client
-    def self.new(base, host, port, klass, klass_args)
-      sin = Socket.sockaddr_in(port.to_s, host.to_s)
-      sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
-      _base = base || Thread.current[:ev_base]
+    attr_reader :conn
+    def initialize(base, host, port, klass, klass_args)
+      @base = base || Thread.current[:ev_base]
+      @sin  = Socket.sockaddr_in(port.to_s, host.to_s)
+      @sin_ptr, @sin_size = FFI::MemoryPointer.from_string(@sin), @sin.size
 
-      bev = EventPanda.bufferevent_socket_new(_base, -1, EventPanda::BEV_OPT_CLOSE_ON_FREE)
+      @bev = EventPanda.bufferevent_socket_new(@base, -1,
+        EventPanda::BEV_OPT_CLOSE_ON_FREE)
+      #EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
+      #EventPanda.bufferevent_lock(@bev)
 
-      if !bev.null?
-        conn = klass.new(*klass_args).init_connection(-1, [host, port], bev)
-        EventPanda.bufferevent_socket_connect(bev, sin_ptr, sin_size)
-        conn
+      if !@bev.null?
+        @conn = klass.new(*klass_args).init_connection(-1, [host, port], @bev)
+        #EM.add_timer(0){
+          EventPanda.bufferevent_socket_connect(@bev, @sin_ptr, @sin_size)
+        #}
+        @conn
       end
     end
   end
   end
-
 
   def self.start_server(host, port, klass, *args)
     EventPanda::TCP::Server.new(Thread.current[:ev_base], host, port, klass, args)
@@ -281,17 +326,6 @@ module EventPanda
     EventPanda::TCP::Client.new(Thread.current[:ev_base], host, port, klass, args)
   end
 
-  def self.stop(_base=nil, interval=nil)
-    base = _base || Thread.current[:ev_base]
-    EventPanda.event_base_loopexit(base, nil)
-    Thread.current[:ev_base] = nil unless base; true
-  end
-
-  def self.free_base(_base=nil)
-    base = _base || Thread.current[:ev_base]
-    EventPanda.event_base_free(base)
-    Thread.current[:ev_base] = nil unless base; true
-  end
 end
 
 
