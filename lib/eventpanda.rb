@@ -109,17 +109,22 @@ module EventPanda
   end
 
   def self.stop
-    close_running_listeners!
+    cleanup_libevent_sockets!
     EventPanda.event_base_loopexit(Thread.current[:ev_base], nil)
   end
 
-  def self.close_running_listeners!
+  def self.cleanup_libevent_sockets!
+    # close client connections
+    EventPanda::TCP::Client.locked.each(&:close_connection)
+    EventPanda::TCP::Client.locked.clear
+
+    # close listener sockets and its client connections
     if Thread.current[:ev_base_lvs]
-      Thread.current[:ev_base_lvs].each(&:close!)
-      Thread.current[:ev_base_lvs].clear
+      Thread.current[:ev_base_lvs].each{|i|
+        i.connections.each(&:close_connection)
+        i.close!
+      }
     end
-    #Thread.current[:ev_base_cvs].each(&:close_connection)
-    #Thread.current[:ev_base_cvs].clear
   end
 
   ::EM = EventPanda
@@ -176,6 +181,8 @@ end
 
 module EventPanda
 
+  autoload :SSL, File.expand_path(File.join(File.dirname(__FILE__), "eventpanda/ssl"))
+
   class Connection
     def init_connection(fd, sockaddr, bev, free_cb=nil)
       @fd, @sockaddr, @bev = fd, sockaddr, bev
@@ -190,8 +197,8 @@ module EventPanda
       EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
 
       @bev_input  = EventPanda.bufferevent_get_input(@bev)
-      @bev_output = EventPanda.bufferevent_get_output(@bev)
-      @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096 / 2)
+      #@bev_output = EventPanda.bufferevent_get_output(@bev)
+      @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096)
     end
 
     def initialize(*args); end
@@ -206,8 +213,9 @@ module EventPanda
 
     def send_data(data)
       length = data.size
-      #length = @bev_tmp.size if length > @bev_tmp.size
+      (length = @bev_tmp.size; chunk = true) if length > @bev_tmp.size
       EventPanda.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
+      send_data(data[length..-1]) if chunk
     end
 
     def _data_cb(bev, ctx)
@@ -226,12 +234,14 @@ module EventPanda
           end
           #init_ssl_for_connection if @use_ssl # post_init can set @use_ssl
         when 32  # ssl connection closed
-          unbind
+          # unbind
+          close_connection
         when 33  # ?
           p ["event_cb", events]
           # close_connection
         when 17  # connection closed
-          unbind
+          # unbind
+          close_connection
         else
           p ["unkown event_cb", events]
           #close_connection
@@ -248,9 +258,6 @@ module EventPanda
     end
   end
 
-  autoload :SSL, "eventpanda/ssl"
-
-  attach_function :event_enable_debug_mode, [], :void
 
   module TCP
   class Server
@@ -268,6 +275,8 @@ module EventPanda
 
       @connections = []
     end
+
+    attr_reader :connections
 
     def accept_error(lisener, ctx)
       p "accept connection error"
@@ -319,15 +328,15 @@ module EventPanda
   end
 
   def self.start_server(host, port, klass, *args)
-    @@servers ||= []
-    @@servers << EventPanda::TCP::Server.new(Thread.current[:ev_base], host, port, klass, args)
+    Thread.current[:ev_base_lvs] ||= []
+    Thread.current[:ev_base_lvs] <<
+      EventPanda::TCP::Server.new(Thread.current[:ev_base], host, port, klass, args)
   end
 
   def self.connect(host, port, klass, *args)
     EventPanda::TCP::Client.create_connection(Thread.current[:ev_base], host, port, klass, args)
   end
 end
-
 
 
 if $0 == __FILE__
@@ -356,6 +365,7 @@ if $0 == __FILE__
     end
 
     EM.start_server("127.0.0.1", 4000, SSL_TestServer)
+    puts "ssl server started\n  try connecting: openssl s_client -connect 127.0.0.1:4000"
   end
 end
 
