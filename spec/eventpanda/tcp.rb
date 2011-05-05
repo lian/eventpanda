@@ -15,7 +15,7 @@ class TestClient < EM::Connection
   end
 
   def receive_data(data)
-    p [@fd, data]
+    #p [@fd, data]
     close_connection
   end
 end
@@ -23,7 +23,7 @@ end
 
 describe 'EventPanda::TCP' do
 
-  it "run and gc - 3" do
+  it "run simple client <-> server" do
     count = 0
     EM.run{
       EM.add_timer(5){ GC.start; EM.stop }

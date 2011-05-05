@@ -9,62 +9,45 @@ describe 'EventPanda basic specs' do
     EM.run{ EM.stop }.should == true
   end
 
+
   it "run and gc" do
     EM.run{ GC.start; EM.stop }.should == true
   end
 
 
-  it "run and gc server" do
-    EM.run{
-      EM.start_server('127.0.0.1', 4045, EM::Connection)
-      EM.start_server('127.0.0.1', 4046, EM::Connection)
-
-      GC.start
-
-      EM.add_timer(1){ EM.stop }
-
-      GC.start
-    }.should == true
-  end
-
-
-  it "run and gc - 1" do
-    EM.run{
-      EM.connect('127.0.0.1', 4045, EM::Connection)
-
-      EM.add_timer(1){ EM.stop }
-    }.should == true
-  end
-
-
-  it "run and gc - 2" do
-    EM.run{
-      EM.add_timer(2){ EM.stop }
-
-      GC.start
-
-      EM.connect('127.0.0.1', 4045, EM::Connection)
-
-    }.should == true
-  end
-
-  it "run and gc - 3" do
+  it "run simple client <-> server" do
     count = 0
 
     EM.run{
-      EM.add_timer(2){ GC.start; EM.stop }
+      #EM.add_timer(2){ GC.start }; #EM.stop }
 
-      GC.start
+      class Server < EM::Connection
+        def post_init
+          send_data "foo\n"
+        end
+      end
 
-      200.times{
+      class Client < EM::Connection
+        def initialize(num)
+          @num = num
+        end
+
+        def receive_data(data)
+          close_connection
+          EM.add_timer(2){ EM.stop } if @num == 400
+        end
+      end
+
+
+      EM.start_server('127.0.0.1', 4045, Server)
+
+      600.times{
         count += 1
-        EM.connect('127.0.0.1', 4045, EM::Connection)
+        EM.connect('127.0.0.1', 4045, Client, count)
       }
-
-      #p ['pid', Process.pid]; gets.chomp
     }
 
-    count.should == 200
+    count.should == 600
   end
 
 end
