@@ -8,10 +8,10 @@ module EventPanda # Timers
   #  timer.cancel
   #
   class Timer
-    def initialize(interval, callback=nil, base=nil, &block)
+    def initialize(interval, callback=nil, base=nil, ms_interval=nil, &block)
       @block = callback || block
       @signature = EventPanda.event_new(base || Thread.current[:ev_base], -1, 0, @block)
-      @tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [interval || 0, 0])
+      @tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [interval || 0, ms_interval || 0])
       schedule!
     end
 
@@ -34,10 +34,10 @@ module EventPanda # Timers
   #  end
   #
   class PeriodicTimer < Timer
-    def initialize(interval, callback=nil, base=nil, &block)
+    def initialize(interval, callback=nil, base=nil, ms_interval=nil, &block)
       @callback = callback || block
       @cb = proc{ @callback.call; schedule! }
-      super(interval, @cb, base)
+      super(interval, @cb, base, ms_interval)
     end
   end
 

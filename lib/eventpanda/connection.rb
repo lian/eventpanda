@@ -1,14 +1,6 @@
 module EventPanda
 
-  # EventPanda::Connection Base
-  class Connection
-    def init_connection(fd, sockaddr, bev, free_cb=nil)
-      @fd, @sockaddr, @bev = fd, sockaddr, bev
-      @free_cb = free_cb
-      init_bev if @bev
-      self
-    end
-
+  module Connection_BEV_Methods
     def init_bev
       EventPanda.bufferevent_setcb(@bev,
         @_data_cb = method(:_data_cb), nil, @_event_cb = method(:_event_cb), nil)
@@ -18,11 +10,6 @@ module EventPanda
       #@bev_output = EventPanda.bufferevent_get_output(@bev)
       @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096)
     end
-
-    def initialize(*args); end
-    def post_init; end
-    def receive_data(data); end
-    def unbind; end
 
     def close_connection
       EventPanda.bufferevent_free(@bev); unbind
@@ -65,6 +52,67 @@ module EventPanda
           #close_connection
       end
     end
+  end
+
+  module Connection_Pipe_Methods
+    def close_connection
+      unbind
+      @pipe_socket.closed? || @pipe_socket.close
+      @free_cb && @free_cb.call(self)
+    end
+
+    #def read_data!
+    #  (data = @pipe.read) && receive_data(data)
+    #end
+
+    def read_data!
+      begin
+        data = @pipe_socket.read_nonblock(4096)
+        receive_data(data) unless data[0] == nil
+      rescue Errno::EAGAIN, EOFError
+      end
+    end
+
+    def get_status; @_unbind_process_status; end
+
+    def alive?
+      !(@_unbind_process_status = @pipe.get_process_status)
+    end
+
+    def send_data(data)
+      @pipe_socket.write(data)
+    end
+  end
+
+
+
+  # EventPanda::Connection Base
+  class Connection
+    def init_connection(fd, sockaddr, bev, free_cb=nil)
+      @free_cb = free_cb
+
+      if sockaddr
+        extend Connection_BEV_Methods # libevent using bufferevent.
+
+        @fd, @sockaddr, @bev = fd, sockaddr, bev
+        init_bev if @bev
+
+      else # is a pipe (bev == PipeDescriptor)
+        extend Connection_Pipe_Methods
+
+        @sockaddr = []
+        @fd, @pipe_socket, @pipe = bev.socket.fileno, bev.socket, bev
+
+        post_init
+      end
+
+      self
+    end
+
+    def initialize(*args); end
+    def post_init; end
+    def receive_data(data); end
+    def unbind; end
 
     # autoloads SSL methods
     def method_missing(*a) # :nodoc:

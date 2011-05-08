@@ -1,10 +1,9 @@
 require 'eventpanda/ffi-libevent'
 
-# eventmachine reactor methods
 require 'eventpanda/reactor'
-
 require 'eventpanda/timer'
 require 'eventpanda/connection'
+require 'eventpanda/pipe'
 require 'eventpanda/version'
 
 
