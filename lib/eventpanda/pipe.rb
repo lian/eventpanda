@@ -67,7 +67,7 @@ module EventPanda
       C.dup2(sockets[1].fileno, $stdin.fileno)
       sockets[1].close
       C.dup2($stdin.fileno, $stdout.fileno)
-      C.execvp(cmd) # exec command here.
+      exec(*cmd) # exec command here.
       exit -1
     }
 
@@ -87,14 +87,6 @@ module EventPanda
     extend FFI::Library
     ffi_lib 'c'
     attach_function :dup2, [:int, :int], :int
-    attach_function :ffi_execvp, :execvp, [:string, :pointer], :int
-
-    def self.execvp(cmd)
-      ptrs = cmd.map{|i| FFI::MemoryPointer.from_string(i) } + [nil]
-      argv = FFI::MemoryPointer.new(:pointer, ptrs.length)
-      ptrs.each_with_index{|p,i| argv[i].put_pointer(0,  p) }
-      ffi_execvp(cmd[0], argv)
-    end
   end
 
   class PipeDescriptor
