@@ -17,6 +17,7 @@ describe 'EventPanda basic specs' do
 
   it "run simple client <-> server" do
     count = 0
+    $test_size = 85
 
     EM.run{
       #EM.add_timer(2){ GC.start }; #EM.stop }
@@ -34,20 +35,20 @@ describe 'EventPanda basic specs' do
 
         def receive_data(data)
           close_connection
-          EM.add_timer(2){ EM.stop } if @num == 400
+          EM.add_timer(2){ EM.stop } if @num == $test_size
         end
       end
 
 
-      EM.start_server('127.0.0.1', 4045, Server)
+      EM.start_server('127.0.0.1', 40045, Server)
 
-      600.times{
+      $test_size.times{
         count += 1
-        EM.connect('127.0.0.1', 4045, Client, count)
+        EM.connect('127.0.0.1', 40045, Client, count)
       }
     }
 
-    count.should == 600
+    count.should == $test_size
   end
 
 end

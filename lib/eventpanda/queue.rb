@@ -1,5 +1,6 @@
 module EventPanda
 
+=begin
   # figure how to implement #schedule and #next_tick right. works for now.
   def self.schedule(&b);  EventPanda::Timer.new(0, b); end
   def self.next_tick(&b); EventPanda::Timer.new(0, b); end
@@ -25,6 +26,7 @@ module EventPanda
       object.respond_to?(:call) ? object : (blk || raise(ArgumentError))
     end
   end
+=end
 
 
   # A cross thread, reactor scheduled, linear queue.
@@ -71,6 +73,8 @@ module EventPanda
         @popq.shift.call @items.shift until @items.empty? || @popq.empty?
       end
     end
+    alias :<< :push
+
 
     # N.B. This is a peek, it's not thread safe, and may only tend toward 
     # accuracy.
