@@ -11,11 +11,11 @@ module EventPanda
 
     unless @conn_pipes_queue
       #EventPanda.next_tick do
-        @conn_pipes_queue = PeriodicTimer.new(0, nil, nil, 300){
+        @conn_pipes_queue = PeriodicTimer.new(0.30){
           @conn_pipes.each{|c| c.read_data! }
         }
 
-        @conn_pipes_queue_flush = PeriodicTimer.new(1, nil, nil, 500){
+        @conn_pipes_queue_flush = PeriodicTimer.new(1.50){
           @conn_pipes.each{|c|
             next if c.alive?
 
