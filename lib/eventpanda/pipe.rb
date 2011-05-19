@@ -4,44 +4,48 @@ require 'fcntl'
 
 module EventPanda
 
-  @conn_pipes = []
+  @conn_pipes = {}
 
   def self.add_connection_pipe(conn)
-    @conn_pipes << conn
+    @conn_pipes[conn.socket] = conn
 
     unless @conn_pipes_queue
-      #EventPanda.next_tick do
         @conn_pipes_queue = PeriodicTimer.new(0.30){
-          @conn_pipes.each{|c| c.read_data! }
+          if r = Kernel.select(@conn_pipes.keys, nil, nil, 0)
+            r[0].each{|socket|
+              begin
+              @conn_pipes[socket]
+                .receive_data( socket.read_nonblock(4096) )
+              rescue EOFError
+              end
+            }
+          end
         }
 
-        @conn_pipes_queue_flush = PeriodicTimer.new(1.50){
-          @conn_pipes.each{|c|
+        @conn_pipes_queue_flush = PeriodicTimer.new(1.00){
+          @conn_pipes.each{|k,c|
             next if c.alive?
-
             c.close_connection
-            @conn_pipes.delete(c)
-
-            if @conn_pipes.size == 0
-              [@conn_pipes_queue, @conn_pipes_queue_flush].each{|i| i.cancel }
-              @conn_pipes_queue, @conn_pipes_queue_flush = nil, nil
-            end
           }
+          flush_conn_pipes!
         }
-      #end
+    end
+  end
+
+  def self.flush_conn_pipes!
+    if @conn_pipes.size == 0
+      [@conn_pipes_queue, @conn_pipes_queue_flush].each{|i| i.cancel }
+      @conn_pipes_queue, @conn_pipes_queue_flush = nil, nil
     end
   end
 
 
   def self.popen(cmd, klass=nil, *args)
-    #free_cb = proc{|conn| @conns.delete(s); @conn_pipes[conn] }
-    free_cb = proc{|conn| @conn_pipes.delete(conn) }
+    free_cb = proc{|conn| @conn_pipes.delete(conn.socket) }
 
     s = invoke_popen( cmd )
     c = (klass || Connection).new(*args).init_connection(-1, nil, s, free_cb)
-
     add_connection_pipe(c)
-    #@conns[s] = c
 
     yield(c) if block_given?
     c
@@ -53,7 +57,6 @@ module EventPanda
       cmd_str
     else
       Shellwords.shellwords( cmd_str )
-      #cmd.unshift( cmd.first ) if cmd.first; p cmd
     end
 
     sockets = ::Socket.pair(Socket::AF_UNIX, Socket::SOCK_STREAM, 0) 
@@ -73,9 +76,7 @@ module EventPanda
 
     if pid > 0
       sockets[1].close
-
-      pd = PipeDescriptor.new(sockets[0], pid, cmd)
-      #Add (pd); #output_binding = pd->GetBinding();
+      pipe = PipeDescriptor.new(sockets[0], pid, cmd)
     else
       sockets.each{|s| s.close }
       raise "no fork"
@@ -90,30 +91,30 @@ module EventPanda
   end
 
   class PipeDescriptor
-    attr_reader :socket, :pid
+    attr_reader :socket
 
     def initialize(socket, forked_pid, invoked_cmd)
       @socket, @pid = socket, forked_pid
       @subprocess_command = invoked_cmd
     end
 
-    def read
-      @socket.closed? ? '' : @socket.read
-    end
-
     def get_subprocess_cmd; @subprocess_command; end
     def get_subprocess_pid; @pid; end
-
-    def alive?
-      Process.waitpid(@pid, Process::WNOHANG) ? false : true
-    rescue Errno::ECHILD
-      false
-    end
 
     def get_process_status
       return @process_status if @process_status
       pid, status = Process.waitpid2(@pid, Process::WNOHANG)
       status ? (@socket.close; @process_status = status) : nil
+    end
+
+    def read
+      @socket.closed? ? '' : @socket.read
+    end
+
+    def alive?
+      Process.waitpid(@pid, Process::WNOHANG) ? false : true
+    rescue Errno::ECHILD
+      false
     end
 
     def exitstatus

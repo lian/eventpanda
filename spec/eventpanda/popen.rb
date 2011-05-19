@@ -13,7 +13,6 @@ describe 'EventPanda #popen' do
     fd.get_process_status.should == nil
     fd.read.should == "hello\n"
     fd.read.should == ""
-    fd.get_process_status.should != nil
     fd.get_process_status.exitstatus.should == 0
     fd.exitstatus.should == 0
     fd.read.should == ""

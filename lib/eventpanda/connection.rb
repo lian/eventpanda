@@ -61,17 +61,7 @@ module EventPanda
       @free_cb && @free_cb.call(self)
     end
 
-    #def read_data!
-    #  (data = @pipe.read) && receive_data(data)
-    #end
-
-    def read_data!
-      begin
-        data = @pipe_socket.read_nonblock(4096)
-        receive_data(data) unless data[0] == nil
-      rescue Errno::EAGAIN, EOFError
-      end
-    end
+    def socket; @pipe_socket; end
 
     def get_status; @_unbind_process_status; end
 
@@ -102,7 +92,6 @@ module EventPanda
 
         @sockaddr = []
         @fd, @pipe_socket, @pipe = bev.socket.fileno, bev.socket, bev
-
         post_init
       end
 
