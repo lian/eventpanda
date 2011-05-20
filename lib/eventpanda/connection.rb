@@ -12,8 +12,10 @@ module EventPanda
     end
 
     def close_connection
-      unbind
+      @__closed ? (return nil) : @__closed=true
+      p ['close_connection']
       EventPanda.bufferevent_free(@bev)
+      unbind
       @__free_cb && @__free_cb.call(self)
     end
 
@@ -21,7 +23,12 @@ module EventPanda
       length = data.size
       (length = @bev_tmp.size; chunk = true) if length > @bev_tmp.size
       EventPanda.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
-      send_data(data[length..-1]) if chunk
+
+      if chunk
+        send_data(data[length..-1])
+      else
+        close_connection if @close_after_writing
+      end
     end
 
     def _data_cb(bev, ctx)
@@ -86,7 +93,7 @@ module EventPanda
     def __init_module(fd, sockaddr, bev, free_cb=nil)
       @__socket  = bev
       @__free_cb = free_cb
-      @sockaddr  = []
+      @sockaddr  = ""
       post_init
     end
   end
@@ -112,6 +119,9 @@ module EventPanda
     def post_init; end
     def receive_data(data); end
     def unbind; end
+
+    def get_peername; @sockaddr; end
+    def close_connection_after_writing; @close_after_writing = true; end
 
     def method_missing(*a) # :nodoc:
       # autoload ssl methods

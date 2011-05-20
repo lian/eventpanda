@@ -70,8 +70,9 @@ module TCP
     end
 
     def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
-      sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
-      #p ["new connection", fd, sockaddr]
+      #sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
+      sockaddr = sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")
+      #p ["new connection", fd, sockaddr, Socket.unpack_sockaddr_in(sockaddr).reverse]
 
       base = EventPanda.evconnlistener_get_base(listener)
       bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
