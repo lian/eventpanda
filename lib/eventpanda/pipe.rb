@@ -4,48 +4,46 @@ require 'fcntl'
 
 module EventPanda
 
-  @conn_pipes = {}
+  @pipe_sockets = []
 
-  def self.add_connection_pipe(conn)
-    @conn_pipes[conn.socket] = conn
+  def self.add_pipe_socket(socket)
+    # socket must include PipeHelperMethods
+    @pipe_sockets << socket
 
-    unless @conn_pipes_queue
-        @conn_pipes_queue = PeriodicTimer.new(0.30){
-          if r = Kernel.select(@conn_pipes.keys, nil, nil, 0)
+    unless @__pipes_queue
+        @__pipes_queue = PeriodicTimer.new(0.30){
+
+          if r = Kernel.select(@pipe_sockets, nil, nil, 0)
             r[0].each{|socket|
+              buf = ""
               begin
-              @conn_pipes[socket]
-                .receive_data( socket.read_nonblock(4096) )
+                loop{ buf += socket.read_nonblock(4096) }
+
               rescue EOFError
+                buf[0] && socket.on_read( buf )
+                status = socket.get_subprocess_status
+                socket.on_close(status)
+
+              rescue Errno::EAGAIN
+                buf[0] && socket.on_read( buf )
               end
             }
+          else
+            (@__pipes_queue.cancel; @__pipes_queue=nil) if @pipe_sockets.size == 0
           end
         }
-
-        @conn_pipes_queue_flush = PeriodicTimer.new(1.00){
-          @conn_pipes.each{|k,c|
-            next if c.alive?
-            c.close_connection
-          }
-          flush_conn_pipes!
-        }
-    end
-  end
-
-  def self.flush_conn_pipes!
-    if @conn_pipes.size == 0
-      [@conn_pipes_queue, @conn_pipes_queue_flush].each{|i| i.cancel }
-      @conn_pipes_queue, @conn_pipes_queue_flush = nil, nil
     end
   end
 
 
   def self.popen(cmd, klass=nil, *args)
-    free_cb = proc{|conn| @conn_pipes.delete(conn.socket) }
+    free_cb = proc{|socket| @pipe_sockets.delete(socket) }
 
     s = invoke_popen( cmd )
     c = (klass || Connection).new(*args).init_connection(-1, nil, s, free_cb)
-    add_connection_pipe(c)
+
+    s.set_callbacks( c.method(:receive_data), c.method(:on_subprocess_exit) )
+    add_pipe_socket(s)
 
     yield(c) if block_given?
     c
@@ -61,6 +59,7 @@ module EventPanda
 
     sockets = ::Socket.pair(Socket::AF_UNIX, Socket::SOCK_STREAM, 0) 
     val = sockets[0].fcntl(Fcntl::F_GETFL, 0)
+
     unless sockets[0].fcntl(Fcntl::F_SETFL, val | Fcntl::O_NONBLOCK) == 0
       sockets.each{|s| s.close }; return nil
     end
@@ -76,7 +75,11 @@ module EventPanda
 
     if pid > 0
       sockets[1].close
-      pipe = PipeDescriptor.new(sockets[0], pid, cmd)
+      s = sockets[0]
+
+      s.extend PipeHelperMethods
+      s.init_pipe_helper(pid, cmd)
+      s
     else
       sockets.each{|s| s.close }
       raise "no fork"
@@ -90,25 +93,26 @@ module EventPanda
     attach_function :dup2, [:int, :int], :int
   end
 
-  class PipeDescriptor
-    attr_reader :socket
-
-    def initialize(socket, forked_pid, invoked_cmd)
-      @socket, @pid = socket, forked_pid
-      @subprocess_command = invoked_cmd
+  module PipeHelperMethods
+    def init_pipe_helper(pid, invoked_cmd)
+      @pid, @subprocess_command = pid, invoked_cmd
     end
 
-    def get_subprocess_cmd; @subprocess_command; end
-    def get_subprocess_pid; @pid; end
+    def set_callbacks(receive_cb, exit_cb)
+      @__on_data, @__on_close = receive_cb, exit_cb
+    end
+    def on_read(data);    @__on_data.call(data);    end
+    def on_close(status); @__on_close.call(status); end
 
-    def get_process_status
-      return @process_status if @process_status
+    def read_pipe; closed? ? '' : read; end
+
+    def subprocess_cmd; @subprocess_command; end
+    def subprocess_pid; @pid; end
+
+    def get_subprocess_status
+      return @__status if @__status
       pid, status = Process.waitpid2(@pid, Process::WNOHANG)
-      status ? (@socket.close; @process_status = status) : nil
-    end
-
-    def read
-      @socket.closed? ? '' : @socket.read
+      status ? (close; @__status = status) : nil
     end
 
     def alive?
@@ -118,8 +122,8 @@ module EventPanda
     end
 
     def exitstatus
-      (s = get_process_status) ? s.exitstatus : nil
+      (s = get_subprocess_status) ? s.exitstatus : nil
     end
-  end # PipeDescriptor
+  end
 
 end # EventPanda

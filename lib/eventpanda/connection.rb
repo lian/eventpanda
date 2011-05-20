@@ -12,8 +12,9 @@ module EventPanda
     end
 
     def close_connection
-      EventPanda.bufferevent_free(@bev); unbind
-      @free_cb && @free_cb.call(self)
+      unbind
+      EventPanda.bufferevent_free(@bev)
+      @__free_cb && @__free_cb.call(self)
     end
 
     def send_data(data)
@@ -25,7 +26,6 @@ module EventPanda
 
     def _data_cb(bev, ctx)
       length = EventPanda.evbuffer_get_length(@bev_input)
-      #length = @bev_tmp.size if length > @bev_tmp.size
       EventPanda.bufferevent_read(@bev, @bev_tmp, length)
       receive_data(@bev_tmp.read_string(length))
     end
@@ -52,25 +52,42 @@ module EventPanda
           #close_connection
       end
     end
+
+    def __init_module(fd, sockaddr, bev, free_cb=nil)
+      @fd, @sockaddr, @bev = fd, sockaddr, bev
+      @__free_cb = free_cb
+      init_bev if @bev
+    end
   end
 
   module Connection_Pipe_Methods
     def close_connection
       unbind
-      @pipe_socket.closed? || @pipe_socket.close
-      @free_cb && @free_cb.call(self)
+      @__socket.closed? || @__socket.close
+      @__free_cb && @__free_cb.call(@__socket)
     end
 
-    def socket; @pipe_socket; end
-
-    def get_status; @_unbind_process_status; end
+    def socket; @__socket; end
+    def get_status; @__subprocess_status; end
 
     def alive?
-      !(@_unbind_process_status = @pipe.get_process_status)
+      !(@__subprocess_status = @__socket.get_subprocess_status)
+    end
+
+    def on_subprocess_exit(status)
+      @__subprocess_status = status
+      close_connection
     end
 
     def send_data(data)
-      @pipe_socket.write(data)
+      @__socket.write(data)
+    end
+
+    def __init_module(fd, sockaddr, bev, free_cb=nil)
+      @__socket  = bev
+      @__free_cb = free_cb
+      @sockaddr  = []
+      post_init
     end
   end
 
@@ -79,22 +96,15 @@ module EventPanda
   # EventPanda::Connection Base
   class Connection
     def init_connection(fd, sockaddr, bev, free_cb=nil)
-      @free_cb = free_cb
-
       if sockaddr
-        extend Connection_BEV_Methods # libevent using bufferevent.
-
-        @fd, @sockaddr, @bev = fd, sockaddr, bev
-        init_bev if @bev
-
-      else # is a pipe (bev == PipeDescriptor)
+        # libevent using bufferevent.
+        extend Connection_BEV_Methods
+        __init_module(fd, sockaddr, bev, free_cb)
+      else
+        # bev == ::Socket with PipeHelperMethods Module
         extend Connection_Pipe_Methods
-
-        @sockaddr = []
-        @fd, @pipe_socket, @pipe = bev.socket.fileno, bev.socket, bev
-        post_init
+        __init_module(fd, sockaddr, bev, free_cb)
       end
-
       self
     end
 
@@ -103,13 +113,13 @@ module EventPanda
     def receive_data(data); end
     def unbind; end
 
-    # autoloads SSL methods
     def method_missing(*a) # :nodoc:
+      # autoload ssl methods
       (a.first == :start_tls) ? \
       (extend EventPanda::SSL::ConnectionMethods; send(*a)) : super(*a)
     end
-
   end # Connection
+
 
   autoload :SSL, File.expand_path( File.join(File.dirname(__FILE__), 'ssl') )
 

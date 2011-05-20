@@ -7,15 +7,15 @@ describe 'EventPanda #popen' do
   it "#invoke_popen" do
     cmd = "ruby -e'puts \"hello\"'"
     fd = EM.invoke_popen(cmd)
-    fd.get_subprocess_cmd.should == Shellwords.shellwords(cmd)
-    fd.get_subprocess_pid.should != 0
+    fd.subprocess_cmd.should == Shellwords.shellwords(cmd)
+    fd.subprocess_pid.should != 0
     fd.alive?.should == true
-    fd.get_process_status.should == nil
-    fd.read.should == "hello\n"
-    fd.read.should == ""
-    fd.get_process_status.exitstatus.should == 0
+    fd.get_subprocess_status.should == nil
+    fd.read_pipe.should == "hello\n"
+    fd.read_pipe.should == ""
+    fd.get_subprocess_status.exitstatus.should == 0
     fd.exitstatus.should == 0
-    fd.read.should == ""
+    fd.read_pipe.should == ""
     fd.alive?.should == false
   end
 
