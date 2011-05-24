@@ -70,12 +70,12 @@ module TCP
     end
 
     def accept_connection(listener, fd, sockaddr_ptr, socklen, ctx)
-      #sockaddr = Socket.unpack_sockaddr_in(sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")).reverse
-      sockaddr = sockaddr_ptr.get_array_of_uint8(0, socklen).pack("C*")
-      #p ["new connection", fd, sockaddr, Socket.unpack_sockaddr_in(sockaddr).reverse]
+      sockaddr = sockaddr_ptr.read_string(socklen)
+      #p ["new connection", fd, Socket.unpack_sockaddr_in(sockaddr)]
 
       base = EventPanda.evconnlistener_get_base(listener)
-      bev  = EventPanda.bufferevent_socket_new(base, fd, EventPanda::BEV_OPT_CLOSE_ON_FREE)
+      bev  = EventPanda.bufferevent_socket_new(base, fd,
+               EventPanda::BEV_OPT_CLOSE_ON_FREE|EventPanda::BEV_OPT_DEFER_CALLBACKS)
 
       free_cb = proc{|conn| @connections.delete(conn) }
 
@@ -97,7 +97,8 @@ module TCP
       sin  = Socket.sockaddr_in(port.to_s, host.to_s)
       sin_ptr, sin_size = FFI::MemoryPointer.from_string(sin), sin.size
 
-      bev = EventPanda.bufferevent_socket_new(base, -1, EventPanda::BEV_OPT_CLOSE_ON_FREE)
+      bev = EventPanda.bufferevent_socket_new(base, -1,
+              EventPanda::BEV_OPT_CLOSE_ON_FREE|EventPanda::BEV_OPT_DEFER_CALLBACKS)
 
       free_cb = proc{|conn| @locked.delete(conn) }
 

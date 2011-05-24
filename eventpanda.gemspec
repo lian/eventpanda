@@ -12,7 +12,7 @@ Gem::Specification.new do |s|
   s.email       = ["meta.rb@gmail.com"]
   s.homepage    = "http://github.com/lian/eventpanda"
   s.summary     = "ffi bindings for libevent. API compatible to EventMachine."
-  s.description = "eventpanda is an API compatible drop-in replacement for EventMachine using FFI instead of C++."
+  s.description = "eventpanda is an API compatible drop-in replacement for EventMachine using FFI and libevent instead of the C++ reactor."
  
   s.required_rubygems_version = ">= 1.3.7"
   #s.rubyforge_project         = "eventpanda"

@@ -1,6 +1,6 @@
 # Eventpanda
 
-This library provides ffi bindings for libevent with the Eventmachine API.
+eventpanda is an API compatible drop-in replacement for EventMachine using FFI and libevent instead of the C++ reactor.
 
 ## Notes
 

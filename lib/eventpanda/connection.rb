@@ -13,7 +13,6 @@ module EventPanda
 
     def close_connection
       @__closed ? (return nil) : @__closed=true
-      p ['close_connection']
       EventPanda.bufferevent_free(@bev)
       unbind
       @__free_cb && @__free_cb.call(self)
