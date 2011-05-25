@@ -122,6 +122,14 @@ module EventPanda
     def get_peername; @sockaddr; end
     def close_connection_after_writing; @close_after_writing = true; end
 
+    def comm_inactivity_timeout
+      # TODO
+    end
+
+    def comm_inactivity_timeout= value
+      # TODO
+    end
+
     def method_missing(*a) # :nodoc:
       # autoload ssl methods
       (a.first == :start_tls) ? \

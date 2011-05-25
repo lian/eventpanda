@@ -17,20 +17,24 @@ describe 'EventPanda basic specs' do
 
   it "run simple client <-> server" do
     count = 0
-    $test_size = 85
+    $test_size = 250
 
     EM.run{
       #EM.add_timer(2){ GC.start }; #EM.stop }
 
       class Server < EM::Connection
         def post_init
-          send_data "foo\n"
+          send_data "A"*1024
         end
       end
 
       class Client < EM::Connection
         def initialize(num)
           @num = num
+        end
+
+        def post_init
+          send_data "B"*1024
         end
 
         def receive_data(data)
