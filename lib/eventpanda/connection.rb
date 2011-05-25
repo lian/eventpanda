@@ -26,7 +26,7 @@ module EventPanda
       if chunk
         send_data(data[length..-1])
       else
-        close_connection if @close_after_writing
+        #close_connection if @close_after_writing
       end
     end
 
@@ -120,7 +120,8 @@ module EventPanda
     def unbind; end
 
     def get_peername; @sockaddr; end
-    def close_connection_after_writing; @close_after_writing = true; end
+    #def close_connection_after_writing; @close_after_writing = true; end
+    def close_connection_after_writing; EM.schedule{ close_connection }; end
 
     def comm_inactivity_timeout
       # TODO
