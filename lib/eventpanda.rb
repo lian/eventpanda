@@ -29,6 +29,11 @@ module EventPanda
     end
   end
 
+  def self.epoll
+    # libevent uses epoll if found. you can configure it
+    # to specifically ask for it though. implement later..
+  end
+
   ::EM = ::EventMachine = EventPanda
 end
 
