@@ -9,13 +9,7 @@ module EventPanda
     @threadqueue << [op||blk, callback]
   end
 
-
-  class << self
-    attr_reader   :threadpool
-    attr_accessor :threadpool_size
-    threadpool_size = 10
-  end
-  @threadpool = nil
+  @threadpool_size = 10
 
   def self.spawn_threadpool # :nodoc:
     until @threadpool.size == @threadpool_size.to_i

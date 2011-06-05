@@ -35,13 +35,14 @@ describe 'EventPanda #popen' do
       end
       def unbind
         @a << "ruby died with exit status: #{get_status.exitstatus}"
+        EM.stop
       end
     end
 
 
     EM.run{
       EM.popen("ruby -e' $stdout.sync = true; gets.to_i.times{ |i| puts i+1; sleep 1 } '", RubyCounter, out)
-    }.should == true
+    }
 
     out.should == [
       "ruby sent me: 1\n",

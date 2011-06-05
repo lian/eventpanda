@@ -35,15 +35,14 @@ module EventPanda
   def self.add_shutdown_hook(&block); @tails << block; end
   def self.stop_event_loop; EventPanda.stop; end
 
-
-
   def self.initialize_event_machine
     Thread.current[:ev_base] ||= EventPanda.event_base_new
   end
 
   def self.run_machine
-    EventPanda.event_base_loop(Thread.current[:ev_base], 0)
-    true
+    while @reactor_running
+      EventPanda.event_base_loop(Thread.current[:ev_base], 0)
+    end; true
   end
 
   def self.release_machine
@@ -112,8 +111,8 @@ module EventPanda
     run_deferred_callbacks
   end
 
-  def self.run_deferred_callbacks # :nodoc:
-    # defer.rb implements this method.
+  def self.cancel_timer(t)
+    t.respond_to?(:cancel) && t.cancel
   end
 
 end

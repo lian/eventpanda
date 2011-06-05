@@ -12,7 +12,8 @@ require 'eventpanda/em/eventmachine' if ENV['SKIP_EM']
 module EventPanda
   def self.stop
     cleanup_libevent_sockets!
-    EventPanda.event_base_loopexit(Thread.current[:ev_base], nil)
+    @reactor_running = false
+    EventPanda.event_base_loopbreak(Thread.current[:ev_base])
   end
 
   def self.cleanup_libevent_sockets!

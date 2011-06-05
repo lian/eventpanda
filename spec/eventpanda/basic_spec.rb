@@ -5,7 +5,6 @@ require 'eventpanda'
 describe 'EventPanda basic specs' do
 
   it "run and stop" do
-    EM.run{ }.should == true
     EM.run{ EM.stop }.should == true
   end
 
@@ -39,7 +38,7 @@ describe 'EventPanda basic specs' do
 
         def receive_data(data)
           close_connection
-          EM.add_timer(2){ EM.stop } if @num == $test_size
+          EM.stop if @num == $test_size
         end
       end
 
