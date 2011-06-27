@@ -11,17 +11,17 @@ module EventPanda # Timers
     def initialize(interval, callback=nil, base=nil, &block)
       sec, msec = interval.divmod(1.0); msec = (msec*1000).to_i
       @block = callback || block
-      @signature = EventPanda.event_new(base || Thread.current[:ev_base], -1, 0, @block)
+      @signature = Libevent.event_new(base || Thread.current[:ev_base], -1, 0, @block)
       @tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [sec, msec])
       schedule!
     end
 
     def schedule!
-      EventPanda.event_add(@signature, @tv) if @signature
+      Libevent.event_add(@signature, @tv) if @signature
     end
 
     def cancel
-      EventPanda.event_free(@signature)
+      Libevent.event_free(@signature)
       @signature, @tv, @block = nil, nil, nil
     end
   end
@@ -42,6 +42,6 @@ module EventPanda # Timers
     end
   end
 
-  def self.add_timer(i, cb=nil, &b); EventPanda::Timer.new(i, cb || b); end
-  def self.add_periodic_timer(i, cb=nil, &b); EventPanda::PeriodicTimer.new(i, cb || b); end
+  def self.add_timer(i, cb=nil, &b); Timer.new(i, cb || b); end
+  def self.add_periodic_timer(i, cb=nil, &b); PeriodicTimer.new(i, cb || b); end
 end

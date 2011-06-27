@@ -2,26 +2,41 @@ module EventPanda
 
   module Connection_BEV_Methods
     def init_bev
-      EventPanda.bufferevent_setcb(@bev,
+      Libevent.bufferevent_setcb(@bev,
         @_data_cb = method(:_data_cb), nil, @_event_cb = method(:_event_cb), nil)
-      EventPanda.bufferevent_enable(@bev, EventPanda::EV_READ|EventPanda::EV_WRITE)
+      Libevent.bufferevent_enable(@bev, Libevent::EV_READ|Libevent::EV_WRITE)
 
-      @bev_input  = EventPanda.bufferevent_get_input(@bev)
-      #@bev_output = EventPanda.bufferevent_get_output(@bev)
+      @bev_input  = Libevent.bufferevent_get_input(@bev)
+      @bev_output = Libevent.bufferevent_get_output(@bev)
       @bev_tmp    = FFI::MemoryPointer.new(:uint8, 4096)
     end
 
-    def close_connection
+    def close_connection(after_writing=false)
       @__closed ? (return nil) : @__closed=true
-      EventPanda.bufferevent_free(@bev)
-      unbind
-      @__free_cb && @__free_cb.call(self)
+
+      close_conn = proc{
+        Libevent.bufferevent_free(@bev)
+        unbind
+        @__free_cb && @__free_cb.call(self)
+      }
+
+      if after_writing
+        tick = EM.add_periodic_timer(0){
+          if Libevent.evbuffer_get_length(@bev_output) == 0
+            tick.cancel; close_conn.call
+          end
+        }
+      else
+        close_conn.call
+      end
+    rescue Exception => ex
+      p [ex, ex.backtrace]
     end
 
     def send_data(data)
       length = data.size
       (length = @bev_tmp.size; chunk = true) if length > @bev_tmp.size
-      EventPanda.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
+      Libevent.bufferevent_write(@bev, @bev_tmp.put_string(0, data), length)
 
       if chunk
         send_data(data[length..-1])
@@ -31,8 +46,8 @@ module EventPanda
     end
 
     def _data_cb(bev, ctx)
-      length = EventPanda.evbuffer_get_length(@bev_input)
-      EventPanda.bufferevent_read(@bev, @bev_tmp, length)
+      length = Libevent.evbuffer_get_length(@bev_input)
+      Libevent.bufferevent_read(@bev, @bev_tmp, length)
       receive_data(@bev_tmp.read_string(length))
     end
 
@@ -40,18 +55,18 @@ module EventPanda
       case events
         when 128 # connected (happens only with #connect or ssl)
           unless @use_ssl # with ssl dont run post_init again. accept_connection does this.
-            @fd = EventPanda.bufferevent_getfd(@bev) # update fd ivar
+            @fd = Libevent.bufferevent_getfd(@bev) # update fd ivar
             post_init
           end
           #init_ssl_for_connection if @use_ssl # post_init can set @use_ssl
         when 32  # ssl connection closed
-          # unbind
           close_connection
         when 33  # ?
           p ["event_cb", events]
           # close_connection
         when 17  # connection closed
-          # unbind
+          close_connection
+        when 65  # comm_inactivity_timeout
           close_connection
         else
           p ["unkown event_cb", events]
@@ -67,7 +82,7 @@ module EventPanda
   end
 
   module Connection_Pipe_Methods
-    def close_connection
+    def close_connection(after_writing=false)
       unbind
       @__socket.closed? || @__socket.close
       @__free_cb && @__free_cb.call(@__socket)
@@ -120,16 +135,15 @@ module EventPanda
     def unbind; end
 
     def get_peername; @sockaddr; end
-    #def close_connection_after_writing; @close_after_writing = true; end
-    def close_connection_after_writing; EM.schedule{ close_connection }; end
+    def close_connection_after_writing; close_connection(true); end
 
-    def comm_inactivity_timeout
-      # TODO
+    def comm_inactivity_timeout=(value)
+      sec, msec = (@comm_inactivity_timeout=value).divmod(1.0); msec = (msec*1000).to_i
+      tv = FFI::MemoryPointer.new(:int, 2).put_array_of_int(0, [sec, msec])
+      Libevent.bufferevent_set_timeouts(@bev, tv, tv)
+      @comm_inactivity_timeout
     end
-
-    def comm_inactivity_timeout= value
-      # TODO
-    end
+    def comm_inactivity_timeout; @comm_inactivity_timeout; end
 
     def method_missing(*a) # :nodoc:
       # autoload ssl methods
@@ -137,7 +151,6 @@ module EventPanda
       (extend EventPanda::SSL::ConnectionMethods; send(*a)) : super(*a)
     end
   end # Connection
-
 
   autoload :SSL, File.expand_path( File.join(File.dirname(__FILE__), 'ssl') )
 

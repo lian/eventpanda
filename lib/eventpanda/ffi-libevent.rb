@@ -2,6 +2,7 @@ require 'ffi'
 require 'socket'
 
 module EventPanda
+module Libevent
   extend FFI::Library
   ffi_lib 'event_core'
 
@@ -72,6 +73,10 @@ module EventPanda
   attach_function :bufferevent_getfd, [:pointer], :int
   attach_function :bufferevent_free, [:pointer], :int
 
+  attach_function :bufferevent_set_timeouts, [:pointer, :pointer, :pointer], :void
+  attach_function :bufferevent_flush, [:pointer, :short, :int], :int
+  BEV_FLUSH = 1
+  BEV_FINISHED = 2
 
   EVLOOP_ONCE     = 1
   EVLOOP_NONBLOCK = 2
@@ -86,4 +91,5 @@ module EventPanda
   EV_READ = 2
   EV_WRITE = 4
   EV_PERSIST = 10
+end
 end

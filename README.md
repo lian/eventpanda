@@ -1,10 +1,19 @@
 # Eventpanda
 
-eventpanda is an API compatible drop-in replacement for EventMachine using FFI and libevent instead of the C++ reactor.
+eventpanda is an API compatible drop-in replacement for EventMachine using FFI and libevent2 instead of the C++ reactor.
 
 ## Notes
 
-Not stable yet, dont use it!
+Still in beta, but it works. please report any issues :)
+
+## Examples
+
+### Thin / Rack
+
+    # runs a rack-app on thin using eventpanda instead of eventmachine as its backend.
+    cd eventpanda
+    ruby -Ilib -reventpanda/em/eventmachine -rrack -e "app = Rack::Directory.new('.');  Rack::Handler::Thin.run(app)"
+
 
 ## Installation
 

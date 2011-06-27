@@ -1,10 +1,6 @@
 # tries to implement lib/eventmachine.rb main API
 module EventPanda
 
-  class << self
-    attr_reader :reactor_thread
-  end
-
   @next_tick_mutex = Mutex.new
   @reactor_running = false
   @next_tick_queue = []
@@ -32,23 +28,31 @@ module EventPanda
     (reactor_running? && reactor_thread?) ? cb.call : next_tick{ cb.call }
   end
 
-  def self.add_shutdown_hook(&block); @tails << block; end
-  def self.stop_event_loop; EventPanda.stop; end
-
-  def self.initialize_event_machine
-    Thread.current[:ev_base] ||= EventPanda.event_base_new
+  def self.cancel_timer(t)
+    t.respond_to?(:cancel) && t.cancel
   end
 
-  def self.run_machine
+  def self.add_shutdown_hook(&block); @tails << block; end
+
+  def self.stop_event_loop
+    @reactor_running = false
+    Libevent.event_base_loopbreak(Thread.current[:ev_base])
+  end
+
+  def self.initialize_event_loop
+    Thread.current[:ev_base] ||= Libevent.event_base_new
+  end
+
+  def self.run_event_loop
     while @reactor_running
-      EventPanda.event_base_loop(Thread.current[:ev_base], 0)
+      Libevent.event_base_loop(Thread.current[:ev_base], 0)
     end; true
   end
 
-  def self.release_machine
+  def self.release_event_loop
     base = Thread.current[:ev_base]
     Thread.current[:ev_base] = nil
-    EventPanda.event_base_free(base)
+    Libevent.event_base_free(base)
     base = nil; true
   end
 
@@ -65,7 +69,7 @@ module EventPanda
 
       begin # run loop
         @reactor_running = true
-        initialize_event_machine
+        initialize_event_loop
 
         (b = blk || block) and add_timer(0, b)
         if @next_tick_queue && !@next_tick_queue.empty?
@@ -73,15 +77,15 @@ module EventPanda
         end
 
         @reactor_thread = Thread.current
-        run_machine
+        run_event_loop
 
       ensure # cleanup
         @tails.pop.call until @tails.empty?
 
         begin
-          release_machine
+          release_event_loop
         ensure
-          release_machine_threadpool
+          release_event_loop_threadpool
           @next_tick_queue = []
         end
         @reactor_running, @reactor_thread = false, nil
@@ -91,7 +95,39 @@ module EventPanda
     end; true
   end
 
-  def self.release_machine_threadpool
+
+  # loopback-signalled event.
+  def self.signal_loopbreak # :nodoc:
+    run_deferred_callbacks
+  end
+
+
+  # caller must ensure it is thread-safe.
+  def self.defer(op = nil, callback = nil, &blk)
+    unless @threadpool; require 'thread'
+      @threadpool, @threadqueue, @resultqueue = [], ::Queue.new, ::Queue.new
+      spawn_threadpool
+    end
+    @threadqueue << [op||blk, callback]
+  end
+
+
+  @threadpool_size = 10
+
+  def self.spawn_threadpool # :nodoc:
+    until @threadpool.size == @threadpool_size.to_i
+      @threadpool << Thread.new do
+        Thread.current.abort_on_exception = true
+        while true
+          op, cb = *@threadqueue.pop
+          @resultqueue << [op.call, cb]
+          EventPanda.signal_loopbreak
+        end
+      end
+    end
+  end
+
+  def self.release_event_loop_threadpool
     if @threadpool
       @threadpool.each{|t| t.exit }
       @threadpool.each do |t|
@@ -106,15 +142,15 @@ module EventPanda
     end
   end
 
-  # loopback-signalled event.
-  def self.signal_loopbreak # :nodoc:
-    run_deferred_callbacks
-  end
+  # called by running code from #defer or #next_tick
+  def self.run_deferred_callbacks # :nodoc:
+    @resultqueue && until @resultqueue.empty?
+      result, cb = @resultqueue.pop
+      cb && cb.call(result)
+    end
 
-  def self.cancel_timer(t)
-    t.respond_to?(:cancel) && t.cancel
+    @next_tick_mutex.synchronize{
+      jobs, @next_tick_queue = @next_tick_queue, []; jobs
+    }.each{|j| j.call }
   end
-
 end
-
-require 'eventpanda/defer.rb'
